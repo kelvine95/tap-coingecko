@@ -218,8 +218,10 @@ class AssetProfileStream(RESTStream):
             "fdv_to_tvl_ratio": market_data.get("fdv_to_tvl_ratio"),
             "market_cap_fdv_ratio": market_data.get("market_cap_fdv_ratio"),
             
-            # ROI data
-            "roi": market_data.get("roi"),
+            # ROI data (extract individual fields from roi object)
+            "roi_times": roi_data.get("times") if roi_data else None,
+            "roi_currency": roi_data.get("currency") if roi_data else None,
+            "roi_percentage": roi_data.get("percentage") if roi_data else None,
             
             # Market data timestamp
             "market_data_last_updated": market_data.get("last_updated"),
@@ -344,12 +346,12 @@ class AssetProfileStream(RESTStream):
         # All-time high (ATH)
         th.Property("ath_usd", th.NumberType),
         th.Property("ath_change_percentage_usd", th.NumberType),
-        th.Property("ath_date_usd", th.DateTimeType),
+        th.Property("ath_date_usd", th.DateType),
         
         # All-time low (ATL)
         th.Property("atl_usd", th.NumberType),
         th.Property("atl_change_percentage_usd", th.NumberType),
-        th.Property("atl_date_usd", th.DateTimeType),
+        th.Property("atl_date_usd", th.DateType),
         
         # TVL and DeFi metrics
         th.Property("total_value_locked", th.NumberType),
@@ -357,8 +359,10 @@ class AssetProfileStream(RESTStream):
         th.Property("fdv_to_tvl_ratio", th.NumberType),
         th.Property("market_cap_fdv_ratio", th.NumberType),
         
-        # ROI data
-        th.Property("roi", th.NumberType),
+        # ROI data (individual fields from roi object)
+        th.Property("roi_times", th.NumberType),
+        th.Property("roi_currency", th.StringType),
+        th.Property("roi_percentage", th.NumberType),
         
         # Market data timestamp
         th.Property("market_data_last_updated", th.DateTimeType),
