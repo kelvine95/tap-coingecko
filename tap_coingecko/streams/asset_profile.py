@@ -64,10 +64,8 @@ class AssetProfileStream(RESTStream):
         }
 
     def get_records(self, context: Optional[Mapping[str, Any]]) -> Iterable[Dict[str, Any]]:
-        """Override the default `get_records` to implement the once-per-day logic.
-
-        This method iterates through the configured tokens, checking the stream state
-        to see if a sync has already occurred today.
+        """Override the default `get_records` to implement the once-per-day logic
+        and gracefully handle 404 errors for missing tokens.
         """
         today_str = pendulum.now("UTC").to_date_string()
 
@@ -87,11 +85,16 @@ class AssetProfileStream(RESTStream):
             try:
                 full_context = {**(context or {}), **token_context}
                 yield from super().get_records(full_context)
-            except requests.exceptions.HTTPError as e:
-                if e.response.status_code == 404:
-                    self.logger.warning(f"Token '{token_id}' not found on CoinGecko. Skipping.")
+
+            except FatalAPIError as e:
+                if "404" in str(e):
+                    self.logger.warning(
+                        f"Token '{token_id}' not found (404 error). Skipping."
+                    )
+                    continue
                 else:
-                    raise FatalAPIError(f"Fatal HTTP error for '{token_id}': {e}") from e
+                    self.logger.error(f"A non-404 fatal API error occurred for token '{token_id}'.")
+                    raise e
 
     def parse_response(self, response: requests.Response) -> Iterable[dict]:
         """Parse the single record from the response."""
