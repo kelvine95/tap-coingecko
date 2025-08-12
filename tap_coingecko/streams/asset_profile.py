@@ -287,7 +287,7 @@ class AssetProfileStream(RESTStream):
         th.Property("additional_notices", th.ArrayType(th.StringType)),
         th.Property("description", th.StringType),
         th.Property("country_origin", th.StringType),
-        th.Property("genesis_date", th.DateTimeType),
+        th.Property("genesis_date", th.DateType),
         
         # Images
         th.Property("image_thumb", th.StringType),
