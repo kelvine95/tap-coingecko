@@ -349,12 +349,12 @@ class AssetProfileStream(RESTStream):
         # All-time high (ATH)
         th.Property("ath_usd", th.NumberType),
         th.Property("ath_change_percentage_usd", th.NumberType),
-        th.Property("ath_date_usd", th.DateType),
+        th.Property("ath_date_usd", th.DateTimeType),
         
         # All-time low (ATL)
         th.Property("atl_usd", th.NumberType),
         th.Property("atl_change_percentage_usd", th.NumberType),
-        th.Property("atl_date_usd", th.DateType),
+        th.Property("atl_date_usd", th.DateTimeType),
         
         # TVL and DeFi metrics
         th.Property("total_value_locked", th.NumberType),
@@ -411,4 +411,3 @@ class AssetProfileStream(RESTStream):
         th.Property("last_updated", th.DateTimeType),
         
     ).to_dict()
-    
