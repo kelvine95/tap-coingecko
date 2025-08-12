@@ -114,6 +114,9 @@ class AssetProfileStream(RESTStream):
         detail_platforms = row.get("detail_platforms", {}) or {}
         code_additions_deletions = developer_data.get("code_additions_deletions_4_weeks", {}) or {}
         
+        # Extract ROI data - can be in market_data.roi or root level roi
+        roi_data = market_data.get("roi") or row.get("roi") or {}
+        
         # Helper function to safely get USD values from currency objects
         def get_usd_value(currency_obj):
             if isinstance(currency_obj, dict):
