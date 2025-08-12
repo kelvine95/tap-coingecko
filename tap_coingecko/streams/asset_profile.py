@@ -260,8 +260,8 @@ class AssetProfileStream(RESTStream):
             "snapshot_url": links.get("snapshot_url"),
             "twitter_screen_name": links.get("twitter_screen_name"),
             "facebook_username": links.get("facebook_username"),
-            "bitcointalk_thread_identifier": links.get("bitcointalk_thread_identifier"),
-            "telegram_channel_identifier": links.get("telegram_channel_identifier"),
+            "bitcointalk_thread_identifier": str(links.get("bitcointalk_thread_identifier")) if links.get("bitcointalk_thread_identifier") is not None else None,
+            "telegram_channel_identifier": str(links.get("telegram_channel_identifier")) if links.get("telegram_channel_identifier") is not None else None,
             "subreddit_url": links.get("subreddit_url"),
             "repos_url_github": links.get("repos_url", {}).get("github", [None])[0] if links.get("repos_url", {}).get("github") else None,
             
