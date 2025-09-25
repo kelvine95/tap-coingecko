@@ -132,6 +132,14 @@ class AssetProfileStream(RESTStream):
                 return arr[0]
             return None
 
+        # --- MODIFICATION START ---
+        # Get the primary contract address based on the asset_platform_id
+        asset_platform_id = row.get("asset_platform_id")
+        primary_contract_address = None
+        if asset_platform_id and isinstance(platforms, dict):
+            primary_contract_address = platforms.get(asset_platform_id)
+        # --- MODIFICATION END ---
+
         return {
             # Core identification and timestamp
             "snapshot_date": pendulum.now("UTC").to_date_string(),
@@ -142,6 +150,7 @@ class AssetProfileStream(RESTStream):
             
             # Platform and technical details
             "asset_platform_id": row.get("asset_platform_id"),
+            "contract_address": primary_contract_address, # --- MODIFICATION ---
             "platforms": platforms,
             "detail_platforms": detail_platforms,
             "block_time_in_minutes": row.get("block_time_in_minutes"),
@@ -283,6 +292,7 @@ class AssetProfileStream(RESTStream):
         
         # Platform and technical details
         th.Property("asset_platform_id", th.StringType),
+        th.Property("contract_address", th.StringType), 
         th.Property("platforms", th.ObjectType()),
         th.Property("detail_platforms", th.ObjectType()),
         th.Property("block_time_in_minutes", th.NumberType),
