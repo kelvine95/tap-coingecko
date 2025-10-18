@@ -104,22 +104,29 @@ class AssetProfileStream(RESTStream):
             raise FatalAPIError(f"Error decoding JSON from response: {response.text}") from e
 
     def post_process(self, row: dict, context: Optional[Mapping[str, Any]] = None) -> dict:
-        """Transform the raw API response into a comprehensive flattened record.
-        Normalizes CoinGecko placeholders (e.g., "-") to proper nulls/numbers/datetimes.
-        """
+        """Flatten and sanitize a CoinGecko /coins/{token} response into the asset_profile record."""
 
-        # ---------- helpers ----------
+        # ---------------- helpers ----------------
         def is_empty(v) -> bool:
             return v in (None, "", "-", "–")
 
         def to_number(v):
+            """Return float/None; tolerates stringy numbers like '1,234.56' or '123.0'."""
             if is_empty(v):
                 return None
             if isinstance(v, (int, float)):
-                return v
+                # Normalize NaN/inf to None
+                try:
+                    if v != v or v in (float("inf"), float("-inf")):  # NaN or inf
+                        return None
+                except Exception:
+                    pass
+                return float(v)
             try:
-                # handle stringy numbers like "1,234.56"
-                return float(str(v).replace(",", ""))
+                s = str(v).strip().replace(",", "")
+                if s in ("nan", "NaN", "Infinity", "-Infinity"):
+                    return None
+                return float(s)
             except Exception:
                 return None
 
@@ -128,19 +135,23 @@ class AssetProfileStream(RESTStream):
             return int(n) if n is not None else None
 
         def to_datetime_str(v):
-            """Return ISO-8601 string or None."""
+            """Return ISO-8601 UTC or None, accepting ISO strings or epoch seconds/ms."""
             if is_empty(v):
                 return None
             try:
-                # accept both ISO strings and epoch numbers
                 if isinstance(v, (int, float)):
-                    return pendulum.from_timestamp(v, tz="UTC").to_iso8601_string()
+                    # heuristics: treat >= 10^12 as ms, else seconds
+                    ts = float(v)
+                    if ts > 10**11:
+                        return pendulum.from_timestamp(ts / 1000.0, tz="UTC").to_iso8601_string()
+                    return pendulum.from_timestamp(ts, tz="UTC").to_iso8601_string()
+                # strings
                 return pendulum.parse(str(v), strict=False).in_timezone("UTC").to_iso8601_string()
             except Exception:
                 return None
 
         def to_date_str(v):
-            """Return YYYY-MM-DD or None."""
+            """Return YYYY-MM-DD UTC or None."""
             if is_empty(v):
                 return None
             try:
@@ -148,31 +159,38 @@ class AssetProfileStream(RESTStream):
             except Exception:
                 return None
 
+        def first_or_none(value):
+            """Return first list/tuple element, passthrough string, else None."""
+            if isinstance(value, list) or isinstance(value, tuple):
+                return value[0] if value else None
+            if isinstance(value, str):
+                return value
+            return None
+
         def get_usd_number(d):
+            """Pull numeric USD from a { 'usd': <number|string> } dict."""
             if isinstance(d, dict):
                 return to_number(d.get("usd"))
             return None
 
         def get_usd_datetime_str(d):
+            """Pull datetime (as ISO string) from a { 'usd': <date> } dict."""
             if isinstance(d, dict):
                 return to_datetime_str(d.get("usd"))
             return None
 
-        def first_or_none(arr):
-            return arr[0] if isinstance(arr, list) and arr else None
+        # ---------------- source dicts ----------------
+        market_data = (row.get("market_data") or {}) or {}
+        community_data = (row.get("community_data") or {}) or {}
+        developer_data = (row.get("developer_data") or {}) or {}
+        links = (row.get("links") or {}) or {}
+        image = (row.get("image") or {}) or {}
+        platforms = (row.get("platforms") or {}) or {}
+        detail_platforms = (row.get("detail_platforms") or {}) or {}
+        code_add_del = (developer_data.get("code_additions_deletions_4_weeks") or {}) or {}
 
-        # ---------- source dicts ----------
-        market_data = row.get("market_data", {}) or {}
-        community_data = row.get("community_data", {}) or {}
-        developer_data = row.get("developer_data", {}) or {}
-        links = row.get("links", {}) or {}
-        image = row.get("image", {}) or {}
-        platforms = row.get("platforms", {}) or {}
-        detail_platforms = row.get("detail_platforms", {}) or {}
-        code_add_del = developer_data.get("code_additions_deletions_4_weeks", {}) or {}
-
-        # ROI can be in market_data.roi or at root roi
-        roi_data = market_data.get("roi") or row.get("roi") or {}
+        # ROI may appear in market_data.roi or root roi
+        roi_data = (market_data.get("roi") or row.get("roi") or {}) or {}
 
         # Primary contract by asset_platform_id
         asset_platform_id = row.get("asset_platform_id")
@@ -182,13 +200,14 @@ class AssetProfileStream(RESTStream):
             else None
         )
 
-        # Developer series coercion
+        # Developer weekly series → list[float] | None
         dev_series = developer_data.get("last_4_weeks_commit_activity_series")
-        if isinstance(dev_series, list):
+        if isinstance(dev_series, (list, tuple)):
             dev_series = [to_number(x) for x in dev_series]
         else:
             dev_series = None
 
+        # ---------------- build record ----------------
         return {
             # Core identification and timestamp
             "snapshot_date": pendulum.now("UTC").to_date_string(),
@@ -200,8 +219,8 @@ class AssetProfileStream(RESTStream):
             # Platform and technical details
             "asset_platform_id": row.get("asset_platform_id"),
             "contract_address": contract_address,
-            "platforms": platforms,
-            "detail_platforms": detail_platforms,
+            "platforms": platforms,                     # object, passthrough
+            "detail_platforms": detail_platforms,       # object, passthrough
             "block_time_in_minutes": to_number(row.get("block_time_in_minutes")),
             "hashing_algorithm": row.get("hashing_algorithm"),
 
@@ -313,7 +332,7 @@ class AssetProfileStream(RESTStream):
             "developer_code_deletions_4_weeks": to_number(code_add_del.get("deletions")),
             "developer_last_4_weeks_commit_activity_series": dev_series,
 
-            # Links and social media
+            # Links and social media (all safe access)
             "homepage_url": first_or_none(links.get("homepage")),
             "whitepaper_url": first_or_none(links.get("whitepaper")),
             "blockchain_site_url": first_or_none(links.get("blockchain_site")),
@@ -323,22 +342,21 @@ class AssetProfileStream(RESTStream):
             "snapshot_url": links.get("snapshot_url"),
             "twitter_screen_name": links.get("twitter_screen_name"),
             "facebook_username": links.get("facebook_username"),
-            "bitcointalk_thread_identifier": str(links.get("bitcointalk_thread_identifier"))
-                if links.get("bitcointalk_thread_identifier") is not None else None,
-            "telegram_channel_identifier": str(links.get("telegram_channel_identifier"))
-                if links.get("telegram_channel_identifier") is not None else None,
-            "subreddit_url": links.get("subreddit_url"),
-            "repos_url_github": (
-                (links.get("repos_url", {}) or {}).get("github", [None])[0]
-                if isinstance(links.get("repos_url"), dict)
-                else None
+            "bitcointalk_thread_identifier": (
+                str(links.get("bitcointalk_thread_identifier"))
+                if links.get("bitcointalk_thread_identifier") is not None else None
             ),
+            "telegram_channel_identifier": (
+                str(links.get("telegram_channel_identifier"))
+                if links.get("telegram_channel_identifier") is not None else None
+            ),
+            "subreddit_url": links.get("subreddit_url"),
+            "repos_url_github": first_or_none((links.get("repos_url") or {}).get("github")),
 
             # Additional metadata
             "status_updates_count": to_int(len(row.get("status_updates", [])) if row.get("status_updates") else 0),
             "last_updated": to_datetime_str(row.get("last_updated")),
         }
-
 
     schema = th.PropertiesList(
         # Core identification and timestamp
