@@ -105,9 +105,63 @@ class AssetProfileStream(RESTStream):
 
     def post_process(self, row: dict, context: Optional[Mapping[str, Any]] = None) -> dict:
         """Transform the raw API response into a comprehensive flattened record.
-
-        Based on current CoinGecko API documentation (2025).
+        Normalizes CoinGecko placeholders (e.g., "-") to proper nulls/numbers/datetimes.
         """
+
+        # ---------- helpers ----------
+        def is_empty(v) -> bool:
+            return v in (None, "", "-", "–")
+
+        def to_number(v):
+            if is_empty(v):
+                return None
+            if isinstance(v, (int, float)):
+                return v
+            try:
+                # handle stringy numbers like "1,234.56"
+                return float(str(v).replace(",", ""))
+            except Exception:
+                return None
+
+        def to_int(v):
+            n = to_number(v)
+            return int(n) if n is not None else None
+
+        def to_datetime_str(v):
+            """Return ISO-8601 string or None."""
+            if is_empty(v):
+                return None
+            try:
+                # accept both ISO strings and epoch numbers
+                if isinstance(v, (int, float)):
+                    return pendulum.from_timestamp(v, tz="UTC").to_iso8601_string()
+                return pendulum.parse(str(v), strict=False).in_timezone("UTC").to_iso8601_string()
+            except Exception:
+                return None
+
+        def to_date_str(v):
+            """Return YYYY-MM-DD or None."""
+            if is_empty(v):
+                return None
+            try:
+                return pendulum.parse(str(v), strict=False).in_timezone("UTC").to_date_string()
+            except Exception:
+                return None
+
+        def get_usd_number(d):
+            if isinstance(d, dict):
+                return to_number(d.get("usd"))
+            return None
+
+        def get_usd_datetime_str(d):
+            if isinstance(d, dict):
+                return to_datetime_str(d.get("usd"))
+            return None
+
+        def first_or_none(arr):
+            return arr[0] if isinstance(arr, list) and arr else None
+
+        # ---------- source dicts ----------
         market_data = row.get("market_data", {}) or {}
         community_data = row.get("community_data", {}) or {}
         developer_data = row.get("developer_data", {}) or {}
@@ -115,30 +169,25 @@ class AssetProfileStream(RESTStream):
         image = row.get("image", {}) or {}
         platforms = row.get("platforms", {}) or {}
         detail_platforms = row.get("detail_platforms", {}) or {}
-        code_additions_deletions = developer_data.get("code_additions_deletions_4_weeks", {}) or {}
-        
-        # Extract ROI data - can be in market_data.roi or root level roi
+        code_add_del = developer_data.get("code_additions_deletions_4_weeks", {}) or {}
+
+        # ROI can be in market_data.roi or at root roi
         roi_data = market_data.get("roi") or row.get("roi") or {}
-        
-        # Helper function to safely get USD values from currency objects
-        def get_usd_value(currency_obj):
-            if isinstance(currency_obj, dict):
-                return currency_obj.get("usd")
-            return None
 
-        # Helper function to safely get first item from array
-        def get_first_array_item(arr):
-            if isinstance(arr, list) and len(arr) > 0:
-                return arr[0]
-            return None
-
-        # --- MODIFICATION START ---
-        # Get the primary contract address based on the asset_platform_id
+        # Primary contract by asset_platform_id
         asset_platform_id = row.get("asset_platform_id")
-        primary_contract_address = None
-        if asset_platform_id and isinstance(platforms, dict):
-            primary_contract_address = platforms.get(asset_platform_id)
-        # --- MODIFICATION END ---
+        contract_address = (
+            platforms.get(asset_platform_id)
+            if asset_platform_id and isinstance(platforms, dict)
+            else None
+        )
+
+        # Developer series coercion
+        dev_series = developer_data.get("last_4_weeks_commit_activity_series")
+        if isinstance(dev_series, list):
+            dev_series = [to_number(x) for x in dev_series]
+        else:
+            dev_series = None
 
         return {
             # Core identification and timestamp
@@ -147,140 +196,149 @@ class AssetProfileStream(RESTStream):
             "symbol": row.get("symbol"),
             "name": row.get("name"),
             "web_slug": row.get("web_slug"),
-            
+
             # Platform and technical details
             "asset_platform_id": row.get("asset_platform_id"),
-            "contract_address": primary_contract_address, # --- MODIFICATION ---
+            "contract_address": contract_address,
             "platforms": platforms,
             "detail_platforms": detail_platforms,
-            "block_time_in_minutes": row.get("block_time_in_minutes"),
+            "block_time_in_minutes": to_number(row.get("block_time_in_minutes")),
             "hashing_algorithm": row.get("hashing_algorithm"),
-            
+
             # Categories and metadata
             "categories": row.get("categories"),
             "preview_listing": row.get("preview_listing"),
             "public_notice": row.get("public_notice"),
             "additional_notices": row.get("additional_notices"),
-            "description": row.get("description", {}).get("en") if row.get("description") else None,
+            "description": (row.get("description", {}) or {}).get("en")
+                if isinstance(row.get("description"), dict)
+                else None,
             "country_origin": row.get("country_origin"),
-            "genesis_date": row.get("genesis_date"),
-            
+            "genesis_date": to_date_str(row.get("genesis_date")),
+
             # Images
             "image_thumb": image.get("thumb"),
             "image_small": image.get("small"),
             "image_large": image.get("large"),
-            
+
             # Sentiment and community metrics
-            "sentiment_votes_up_percentage": row.get("sentiment_votes_up_percentage"),
-            "sentiment_votes_down_percentage": row.get("sentiment_votes_down_percentage"),
-            "watchlist_portfolio_users": row.get("watchlist_portfolio_users"),
-            
+            "sentiment_votes_up_percentage": to_number(row.get("sentiment_votes_up_percentage")),
+            "sentiment_votes_down_percentage": to_number(row.get("sentiment_votes_down_percentage")),
+            "watchlist_portfolio_users": to_number(row.get("watchlist_portfolio_users")),
+
             # Market ranking
-            "market_cap_rank": row.get("market_cap_rank"),
-            
+            "market_cap_rank": to_number(row.get("market_cap_rank")),
+
             # Current market data (USD focus)
-            "current_price_usd": get_usd_value(market_data.get("current_price")),
-            "market_cap_usd": get_usd_value(market_data.get("market_cap")),
-            "fully_diluted_valuation_usd": get_usd_value(market_data.get("fully_diluted_valuation")),
-            "total_volume_usd": get_usd_value(market_data.get("total_volume")),
-            "high_24h_usd": get_usd_value(market_data.get("high_24h")),
-            "low_24h_usd": get_usd_value(market_data.get("low_24h")),
-            
-            # Price changes (percentage)
-            "price_change_24h": market_data.get("price_change_24h"),
-            "price_change_percentage_24h": market_data.get("price_change_percentage_24h"),
-            "price_change_percentage_7d": market_data.get("price_change_percentage_7d"),
-            "price_change_percentage_14d": market_data.get("price_change_percentage_14d"),
-            "price_change_percentage_30d": market_data.get("price_change_percentage_30d"),
-            "price_change_percentage_60d": market_data.get("price_change_percentage_60d"),
-            "price_change_percentage_200d": market_data.get("price_change_percentage_200d"),
-            "price_change_percentage_1y": market_data.get("price_change_percentage_1y"),
-            
+            "current_price_usd": get_usd_number(market_data.get("current_price")),
+            "market_cap_usd": get_usd_number(market_data.get("market_cap")),
+            "fully_diluted_valuation_usd": get_usd_number(market_data.get("fully_diluted_valuation")),
+            "total_volume_usd": get_usd_number(market_data.get("total_volume")),
+            "high_24h_usd": get_usd_number(market_data.get("high_24h")),
+            "low_24h_usd": get_usd_number(market_data.get("low_24h")),
+
+            # Price changes (absolute/percentage)
+            "price_change_24h": to_number(market_data.get("price_change_24h")),
+            "price_change_percentage_24h": to_number(market_data.get("price_change_percentage_24h")),
+            "price_change_percentage_7d": to_number(market_data.get("price_change_percentage_7d")),
+            "price_change_percentage_14d": to_number(market_data.get("price_change_percentage_14d")),
+            "price_change_percentage_30d": to_number(market_data.get("price_change_percentage_30d")),
+            "price_change_percentage_60d": to_number(market_data.get("price_change_percentage_60d")),
+            "price_change_percentage_200d": to_number(market_data.get("price_change_percentage_200d")),
+            "price_change_percentage_1y": to_number(market_data.get("price_change_percentage_1y")),
+
             # Price changes in currency (USD)
-            "price_change_percentage_1h_usd": get_usd_value(market_data.get("price_change_percentage_1h_in_currency")),
-            "price_change_percentage_24h_usd": get_usd_value(market_data.get("price_change_percentage_24h_in_currency")),
-            "price_change_percentage_7d_usd": get_usd_value(market_data.get("price_change_percentage_7d_in_currency")),
-            "price_change_percentage_14d_usd": get_usd_value(market_data.get("price_change_percentage_14d_in_currency")),
-            "price_change_percentage_30d_usd": get_usd_value(market_data.get("price_change_percentage_30d_in_currency")),
-            "price_change_percentage_60d_usd": get_usd_value(market_data.get("price_change_percentage_60d_in_currency")),
-            "price_change_percentage_200d_usd": get_usd_value(market_data.get("price_change_percentage_200d_in_currency")),
-            "price_change_percentage_1y_usd": get_usd_value(market_data.get("price_change_percentage_1y_in_currency")),
-            
+            "price_change_percentage_1h_usd": get_usd_number(market_data.get("price_change_percentage_1h_in_currency")),
+            "price_change_percentage_24h_usd": get_usd_number(market_data.get("price_change_percentage_24h_in_currency")),
+            "price_change_percentage_7d_usd": get_usd_number(market_data.get("price_change_percentage_7d_in_currency")),
+            "price_change_percentage_14d_usd": get_usd_number(market_data.get("price_change_percentage_14d_in_currency")),
+            "price_change_percentage_30d_usd": get_usd_number(market_data.get("price_change_percentage_30d_in_currency")),
+            "price_change_percentage_60d_usd": get_usd_number(market_data.get("price_change_percentage_60d_in_currency")),
+            "price_change_percentage_200d_usd": get_usd_number(market_data.get("price_change_percentage_200d_in_currency")),
+            "price_change_percentage_1y_usd": get_usd_number(market_data.get("price_change_percentage_1y_in_currency")),
+
             # Market cap changes
-            "market_cap_change_24h": market_data.get("market_cap_change_24h"),
-            "market_cap_change_percentage_24h": market_data.get("market_cap_change_percentage_24h"),
-            "market_cap_change_24h_usd": get_usd_value(market_data.get("market_cap_change_24h_in_currency")),
-            "market_cap_change_percentage_24h_usd": get_usd_value(market_data.get("market_cap_change_percentage_24h_in_currency")),
-            
+            "market_cap_change_24h": to_number(market_data.get("market_cap_change_24h")),
+            "market_cap_change_percentage_24h": to_number(market_data.get("market_cap_change_percentage_24h")),
+            "market_cap_change_24h_usd": get_usd_number(market_data.get("market_cap_change_24h_in_currency")),
+            "market_cap_change_percentage_24h_usd": get_usd_number(market_data.get("market_cap_change_percentage_24h_in_currency")),
+
             # Supply metrics
-            "total_supply": market_data.get("total_supply"),
-            "max_supply": market_data.get("max_supply"),
-            "circulating_supply": market_data.get("circulating_supply"),
-            
+            "total_supply": to_number(market_data.get("total_supply")),
+            "max_supply": to_number(market_data.get("max_supply")),
+            "circulating_supply": to_number(market_data.get("circulating_supply")),
+
             # All-time high (ATH)
-            "ath_usd": get_usd_value(market_data.get("ath")),
-            "ath_change_percentage_usd": get_usd_value(market_data.get("ath_change_percentage")),
-            "ath_date_usd": get_usd_value(market_data.get("ath_date")),
-            
+            "ath_usd": get_usd_number(market_data.get("ath")),
+            "ath_change_percentage_usd": get_usd_number(market_data.get("ath_change_percentage")),
+            "ath_date_usd": get_usd_datetime_str(market_data.get("ath_date")),
+
             # All-time low (ATL)
-            "atl_usd": get_usd_value(market_data.get("atl")),
-            "atl_change_percentage_usd": get_usd_value(market_data.get("atl_change_percentage")),
-            "atl_date_usd": get_usd_value(market_data.get("atl_date")),
-            
-            # TVL and DeFi metrics
-            "total_value_locked": market_data.get("total_value_locked"),
-            "mcap_to_tvl_ratio": market_data.get("mcap_to_tvl_ratio"),
-            "fdv_to_tvl_ratio": market_data.get("fdv_to_tvl_ratio"),
-            "market_cap_fdv_ratio": market_data.get("market_cap_fdv_ratio"),
-            
-            # ROI data (extract individual fields from roi object)
-            "roi_times": roi_data.get("times") if roi_data else None,
-            "roi_currency": roi_data.get("currency") if roi_data else None,
-            "roi_percentage": roi_data.get("percentage") if roi_data else None,
-            
+            "atl_usd": get_usd_number(market_data.get("atl")),
+            "atl_change_percentage_usd": get_usd_number(market_data.get("atl_change_percentage")),
+            "atl_date_usd": get_usd_datetime_str(market_data.get("atl_date")),
+
+            # TVL and DeFi metrics (sanitized)
+            "total_value_locked": to_number(market_data.get("total_value_locked")),
+            "mcap_to_tvl_ratio": to_number(market_data.get("mcap_to_tvl_ratio")),
+            "fdv_to_tvl_ratio": to_number(market_data.get("fdv_to_tvl_ratio")),
+            "market_cap_fdv_ratio": to_number(market_data.get("market_cap_fdv_ratio")),
+
+            # ROI data
+            "roi_times": to_number(roi_data.get("times")) if isinstance(roi_data, dict) else None,
+            "roi_currency": roi_data.get("currency") if isinstance(roi_data, dict) else None,
+            "roi_percentage": to_number(roi_data.get("percentage")) if isinstance(roi_data, dict) else None,
+
             # Market data timestamp
-            "market_data_last_updated": market_data.get("last_updated"),
-            
-            # Community data (limited to available fields)
-            "facebook_likes": community_data.get("facebook_likes"),
-            "reddit_average_posts_48h": community_data.get("reddit_average_posts_48h"),
-            "reddit_average_comments_48h": community_data.get("reddit_average_comments_48h"),
-            "reddit_subscribers": community_data.get("reddit_subscribers"),
-            "reddit_accounts_active_48h": community_data.get("reddit_accounts_active_48h"),
-            "telegram_channel_user_count": community_data.get("telegram_channel_user_count"),
-            
+            "market_data_last_updated": to_datetime_str(market_data.get("last_updated")),
+
+            # Community data
+            "facebook_likes": to_number(community_data.get("facebook_likes")),
+            "reddit_average_posts_48h": to_number(community_data.get("reddit_average_posts_48h")),
+            "reddit_average_comments_48h": to_number(community_data.get("reddit_average_comments_48h")),
+            "reddit_subscribers": to_number(community_data.get("reddit_subscribers")),
+            "reddit_accounts_active_48h": to_number(community_data.get("reddit_accounts_active_48h")),
+            "telegram_channel_user_count": to_number(community_data.get("telegram_channel_user_count")),
+
             # Developer data
-            "developer_forks": developer_data.get("forks"),
-            "developer_stars": developer_data.get("stars"),
-            "developer_subscribers": developer_data.get("subscribers"),
-            "developer_total_issues": developer_data.get("total_issues"),
-            "developer_closed_issues": developer_data.get("closed_issues"),
-            "developer_pull_requests_merged": developer_data.get("pull_requests_merged"),
-            "developer_pull_request_contributors": developer_data.get("pull_request_contributors"),
-            "developer_commit_count_4_weeks": developer_data.get("commit_count_4_weeks"),
-            "developer_code_additions_4_weeks": code_additions_deletions.get("additions"),
-            "developer_code_deletions_4_weeks": code_additions_deletions.get("deletions"),
-            "developer_last_4_weeks_commit_activity_series": developer_data.get("last_4_weeks_commit_activity_series"),
-            
+            "developer_forks": to_number(developer_data.get("forks")),
+            "developer_stars": to_number(developer_data.get("stars")),
+            "developer_subscribers": to_number(developer_data.get("subscribers")),
+            "developer_total_issues": to_number(developer_data.get("total_issues")),
+            "developer_closed_issues": to_number(developer_data.get("closed_issues")),
+            "developer_pull_requests_merged": to_number(developer_data.get("pull_requests_merged")),
+            "developer_pull_request_contributors": to_number(developer_data.get("pull_request_contributors")),
+            "developer_commit_count_4_weeks": to_number(developer_data.get("commit_count_4_weeks")),
+            "developer_code_additions_4_weeks": to_number(code_add_del.get("additions")),
+            "developer_code_deletions_4_weeks": to_number(code_add_del.get("deletions")),
+            "developer_last_4_weeks_commit_activity_series": dev_series,
+
             # Links and social media
-            "homepage_url": get_first_array_item(links.get("homepage")),
-            "whitepaper_url": get_first_array_item(links.get("whitepaper")),
-            "blockchain_site_url": get_first_array_item(links.get("blockchain_site")),
-            "official_forum_url": get_first_array_item(links.get("official_forum_url")),
-            "chat_url": get_first_array_item(links.get("chat_url")),
-            "announcement_url": get_first_array_item(links.get("announcement_url")),
+            "homepage_url": first_or_none(links.get("homepage")),
+            "whitepaper_url": first_or_none(links.get("whitepaper")),
+            "blockchain_site_url": first_or_none(links.get("blockchain_site")),
+            "official_forum_url": first_or_none(links.get("official_forum_url")),
+            "chat_url": first_or_none(links.get("chat_url")),
+            "announcement_url": first_or_none(links.get("announcement_url")),
             "snapshot_url": links.get("snapshot_url"),
             "twitter_screen_name": links.get("twitter_screen_name"),
             "facebook_username": links.get("facebook_username"),
-            "bitcointalk_thread_identifier": str(links.get("bitcointalk_thread_identifier")) if links.get("bitcointalk_thread_identifier") is not None else None,
-            "telegram_channel_identifier": str(links.get("telegram_channel_identifier")) if links.get("telegram_channel_identifier") is not None else None,
+            "bitcointalk_thread_identifier": str(links.get("bitcointalk_thread_identifier"))
+                if links.get("bitcointalk_thread_identifier") is not None else None,
+            "telegram_channel_identifier": str(links.get("telegram_channel_identifier"))
+                if links.get("telegram_channel_identifier") is not None else None,
             "subreddit_url": links.get("subreddit_url"),
-            "repos_url_github": links.get("repos_url", {}).get("github", [None])[0] if links.get("repos_url", {}).get("github") else None,
-            
+            "repos_url_github": (
+                (links.get("repos_url", {}) or {}).get("github", [None])[0]
+                if isinstance(links.get("repos_url"), dict)
+                else None
+            ),
+
             # Additional metadata
-            "status_updates_count": len(row.get("status_updates", [])) if row.get("status_updates") else 0,
-            "last_updated": row.get("last_updated"),
+            "status_updates_count": to_int(len(row.get("status_updates", [])) if row.get("status_updates") else 0),
+            "last_updated": to_datetime_str(row.get("last_updated")),
         }
+
 
     schema = th.PropertiesList(
         # Core identification and timestamp
